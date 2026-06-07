@@ -8,12 +8,140 @@ import (
 func chooseLayout(state *GameState) []Placement {
 	R := state.Board.GridRows
 	C := state.Board.GridCols
-	ships := state.Board.ShipClasses
+
+	sorted := make([]ShipClass, len(state.Board.ShipClasses))
+	copy(sorted, state.Board.ShipClasses)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Length > sorted[j].Length
+	})
+
+	for attempt := 0; attempt < 80; attempt++ {
+		occupied := make(map[[2]int]bool)
+		buffer := make(map[[2]int]bool)
+		placements := make([]Placement, 0, len(sorted))
+		ok := true
+
+		for _, ship := range sorted {
+			cands := candidatePositions(ship, R, C)
+			placed := false
+			for _, cand := range cands {
+				conflict := false
+				for _, cell := range cand.cells {
+					if buffer[cell] {
+						conflict = true
+						break
+					}
+				}
+				if conflict {
+					continue
+				}
+				for _, cell := range cand.cells {
+					occupied[cell] = true
+					for dr := -1; dr <= 1; dr++ {
+						for dc := -1; dc <= 1; dc++ {
+							buffer[[2]int{cell[0] + dr, cell[1] + dc}] = true
+						}
+					}
+				}
+				placements = append(placements, cand.placement)
+				placed = true
+				break
+			}
+			if !placed {
+				ok = false
+				break
+			}
+		}
+
+		if ok && len(placements) == len(sorted) {
+			return placements
+		}
+	}
+	return chooseLayoutSimple(state)
+}
+
+type candidate struct {
+	cells     [][2]int
+	placement Placement
+}
+
+func candidatePositions(ship ShipClass, R, C int) []candidate {
+	var cands []candidate
+	length := ship.Length
+
+	add := func(r, c int, horiz bool) {
+		cells := make([][2]int, length)
+		for i := 0; i < length; i++ {
+			if horiz {
+				cells[i] = [2]int{r, c + i}
+			} else {
+				cells[i] = [2]int{r + i, c}
+			}
+		}
+		orient := OrientVertical
+		if horiz {
+			orient = OrientHorizontal
+		}
+		cands = append(cands, candidate{
+			cells: cells,
+			placement: Placement{
+				ShipClass:   ship.Class,
+				Orientation: orient,
+				StartRow:    r,
+				StartCol:    c,
+			},
+		})
+	}
+
+	for r := 0; r < R; r++ {
+		for c := 0; c <= C-length; c++ {
+			add(r, c, true)
+		}
+	}
+	for r := 0; r <= R-length; r++ {
+		for c := 0; c < C; c++ {
+			add(r, c, false)
+		}
+	}
+	rand.Shuffle(len(cands), func(i, j int) {
+		cands[i], cands[j] = cands[j], cands[i]
+	})
+	sort.SliceStable(cands, func(i, j int) bool {
+		return edgeScore(cands[i].cells, R, C) > edgeScore(cands[j].cells, R, C)
+	})
+	return cands
+}
+
+func edgeScore(cells [][2]int, R, C int) int {
+	score := 0
+	for _, cell := range cells {
+		r, c := cell[0], cell[1]
+		distEdge := min4(r, c, R-1-r, C-1-c)
+		score += (R - distEdge) // closer to edge = higher
+	}
+	return score
+}
+func min4(a, b, c, d int) int {
+	m := a
+	if b < m {
+		m = b
+	}
+	if c < m {
+		m = c
+	}
+	if d < m {
+		m = d
+	}
+	return m
+}
+func chooseLayoutSimple(state *GameState) []Placement {
+	R := state.Board.GridRows
+	C := state.Board.GridCols
 	for {
 		used := make(map[[2]int]bool)
-		placements := make([]Placement, 0, len(ships))
+		placements := make([]Placement, 0, len(state.Board.ShipClasses))
 		ok := true
-		for _, ship := range ships {
+		for _, ship := range state.Board.ShipClasses {
 			placed := false
 			for tries := 0; tries < 200; tries++ {
 				horiz := rand.Intn(2) == 0
@@ -50,10 +178,8 @@ func chooseLayout(state *GameState) []Placement {
 					orient = OrientHorizontal
 				}
 				placements = append(placements, Placement{
-					ShipClass:   ship.Class,
-					Orientation: orient,
-					StartRow:    r,
-					StartCol:    c,
+					ShipClass: ship.Class, Orientation: orient,
+					StartRow: r, StartCol: c,
 				})
 				placed = true
 				break
@@ -68,6 +194,7 @@ func chooseLayout(state *GameState) []Placement {
 		}
 	}
 }
+
 func chooseShot(state *GameState) (int, int) {
 	R := state.Board.GridRows
 	C := state.Board.GridCols
@@ -78,31 +205,28 @@ func chooseShot(state *GameState) (int, int) {
 	}
 
 	sunkCells := buildSunkCells(state)
+
 	var openHits [][2]int
 	for _, s := range state.YourShots {
 		if s.Outcome == OutcomeHit && !sunkCells[[2]int{s.Row, s.Col}] {
 			openHits = append(openHits, [2]int{s.Row, s.Col})
 		}
 	}
+
 	if len(openHits) >= 2 {
-		shot, found := destroyMode(openHits, tried, R, C)
-		if found {
+		if shot, found := destroyMode(openHits, tried, R, C); found {
 			return shot[0], shot[1]
 		}
 	}
 	if len(openHits) > 0 {
-		shot, found := targetMode(openHits, tried, R, C)
-		if found {
+		if shot, found := targetMode(openHits, tried, R, C); found {
 			return shot[0], shot[1]
 		}
 	}
 	return huntModeProbability(state, tried, sunkCells, R, C)
 }
+
 func destroyMode(openHits [][2]int, tried map[[2]int]bool, R, C int) ([2]int, bool) {
-	hitSet := make(map[[2]int]bool)
-	for _, h := range openHits {
-		hitSet[h] = true
-	}
 	byRow := make(map[int][][2]int)
 	byCol := make(map[int][][2]int)
 	for _, h := range openHits {
@@ -114,14 +238,11 @@ func destroyMode(openHits [][2]int, tried map[[2]int]bool, R, C int) ([2]int, bo
 			continue
 		}
 		sort.Slice(hits, func(i, j int) bool { return hits[i][1] < hits[j][1] })
-		minC := hits[0][1]
-		maxC := hits[len(hits)-1][1]
-		rc := maxC + 1
-		if rc < C && !tried[[2]int{row, rc}] {
+		minC, maxC := hits[0][1], hits[len(hits)-1][1]
+		if rc := maxC + 1; rc < C && !tried[[2]int{row, rc}] {
 			return [2]int{row, rc}, true
 		}
-		lc := minC - 1
-		if lc >= 0 && !tried[[2]int{row, lc}] {
+		if lc := minC - 1; lc >= 0 && !tried[[2]int{row, lc}] {
 			return [2]int{row, lc}, true
 		}
 	}
@@ -130,20 +251,17 @@ func destroyMode(openHits [][2]int, tried map[[2]int]bool, R, C int) ([2]int, bo
 			continue
 		}
 		sort.Slice(hits, func(i, j int) bool { return hits[i][0] < hits[j][0] })
-		minR := hits[0][0]
-		maxR := hits[len(hits)-1][0]
-		dr := maxR + 1
-		if dr < R && !tried[[2]int{dr, col}] {
+		minR, maxR := hits[0][0], hits[len(hits)-1][0]
+		if dr := maxR + 1; dr < R && !tried[[2]int{dr, col}] {
 			return [2]int{dr, col}, true
 		}
-		ur := minR - 1
-		if ur >= 0 && !tried[[2]int{ur, col}] {
+		if ur := minR - 1; ur >= 0 && !tried[[2]int{ur, col}] {
 			return [2]int{ur, col}, true
 		}
 	}
-
 	return [2]int{}, false
 }
+
 func targetMode(openHits [][2]int, tried map[[2]int]bool, R, C int) ([2]int, bool) {
 	dirs := [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
 	for _, hit := range openHits {
@@ -156,25 +274,26 @@ func targetMode(openHits [][2]int, tried map[[2]int]bool, R, C int) ([2]int, boo
 	}
 	return [2]int{}, false
 }
-func huntModeProbability(state *GameState, tried map[[2]int]bool, sunkCells map[[2]int]bool, R, C int) (int, int) {
 
+func huntModeProbability(state *GameState, tried map[[2]int]bool, sunkCells map[[2]int]bool, R, C int) (int, int) {
 	sunkClassSet := make(map[string]bool)
 	for _, c := range state.SunkOpponentShipClasses {
 		sunkClassSet[c] = true
 	}
 	var remainingLengths []int
+	minLength := 100
 	for _, ship := range state.Board.ShipClasses {
 		if !sunkClassSet[ship.Class] {
 			remainingLengths = append(remainingLengths, ship.Length)
+			if ship.Length < minLength {
+				minLength = ship.Length
+			}
 		}
 	}
 	if len(remainingLengths) == 0 {
 		return fallbackRandom(tried, R, C)
 	}
-	density := make([][]int, R)
-	for r := 0; r < R; r++ {
-		density[r] = make([]int, C)
-	}
+
 	blocked := make(map[[2]int]bool)
 	for _, s := range state.YourShots {
 		if s.Outcome == OutcomeMiss {
@@ -185,6 +304,10 @@ func huntModeProbability(state *GameState, tried map[[2]int]bool, sunkCells map[
 		blocked[cell] = true
 	}
 
+	density := make([][]int, R)
+	for r := 0; r < R; r++ {
+		density[r] = make([]int, C)
+	}
 	for _, length := range remainingLengths {
 		for r := 0; r < R; r++ {
 			for c := 0; c <= C-length; c++ {
@@ -197,8 +320,7 @@ func huntModeProbability(state *GameState, tried map[[2]int]bool, sunkCells map[
 				}
 				if valid {
 					for i := 0; i < length; i++ {
-						cell := [2]int{r, c + i}
-						if !tried[cell] {
+						if !tried[[2]int{r, c + i}] {
 							density[r][c+i]++
 						}
 					}
@@ -216,8 +338,7 @@ func huntModeProbability(state *GameState, tried map[[2]int]bool, sunkCells map[
 				}
 				if valid {
 					for i := 0; i < length; i++ {
-						cell := [2]int{r + i, c}
-						if !tried[cell] {
+						if !tried[[2]int{r + i, c}] {
 							density[r+i][c]++
 						}
 					}
@@ -225,11 +346,15 @@ func huntModeProbability(state *GameState, tried map[[2]int]bool, sunkCells map[
 			}
 		}
 	}
+
 	bestScore := -1
 	var bestCells [][2]int
 	for r := 0; r < R; r++ {
 		for c := 0; c < C; c++ {
 			if tried[[2]int{r, c}] {
+				continue
+			}
+			if minLength > 1 && (r+c)%2 != 0 {
 				continue
 			}
 			if density[r][c] > bestScore {
@@ -240,13 +365,22 @@ func huntModeProbability(state *GameState, tried map[[2]int]bool, sunkCells map[
 			}
 		}
 	}
-
+	if len(bestCells) == 0 {
+		for r := 0; r < R; r++ {
+			for c := 0; c < C; c++ {
+				if !tried[[2]int{r, c}] && density[r][c] > 0 {
+					bestCells = append(bestCells, [2]int{r, c})
+				}
+			}
+		}
+	}
 	if len(bestCells) == 0 {
 		return fallbackRandom(tried, R, C)
 	}
 	pick := bestCells[rand.Intn(len(bestCells))]
 	return pick[0], pick[1]
 }
+
 func fallbackRandom(tried map[[2]int]bool, R, C int) (int, int) {
 	var candidates [][2]int
 	for r := 0; r < R; r++ {
@@ -259,6 +393,7 @@ func fallbackRandom(tried map[[2]int]bool, R, C int) (int, int) {
 	pick := candidates[rand.Intn(len(candidates))]
 	return pick[0], pick[1]
 }
+
 func buildSunkCells(state *GameState) map[[2]int]bool {
 	sunkCells := make(map[[2]int]bool)
 	for _, s := range state.YourShots {
@@ -269,6 +404,7 @@ func buildSunkCells(state *GameState) map[[2]int]bool {
 	}
 	return sunkCells
 }
+
 func markConnectedHits(state *GameState, sinkRow, sinkCol int, sunkCells map[[2]int]bool) {
 	shotMap := make(map[[2]int]string)
 	for _, s := range state.YourShots {
